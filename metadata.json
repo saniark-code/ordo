@@ -1,0 +1,7 @@
+{
+  "name": "Ordo",
+  "description": "A calm, minimalist AI-powered organizing app designed to restore order to your physical spaces with a quiet, meditative interface.",
+  "requestFramePermissions": [
+    "camera"
+  ]
+}

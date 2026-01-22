@@ -1,7 +1,6 @@
-
 import React, { useState, useEffect, useRef } from 'react';
-import { GoogleGenAI } from "@google/genai";
 import { Screen, SavedSpace, OrganizingStyle } from './types';
+import { GoogleGenerativeAI } from '@google/generative-ai';
 import { Logo } from './components/Logo';
 import { Button, Card } from './components/UI';
 import { ONBOARDING_CONTENT, STYLE_OPTIONS } from './constants';
@@ -125,19 +124,22 @@ const App: React.FC = () => {
   const [tempName, setTempName] = useState('');
   const [inspirationPrompt, setInspirationPrompt] = useState('');
   const [isGeneratingInspiration, setIsGeneratingInspiration] = useState(false);
+  
   const videoRef = useRef<HTMLVideoElement>(null);
 
+  // Initialize app - load spaces and show onboarding
   useEffect(() => {
     loadSpaces();
     const timer = setTimeout(() => setScreen('onboarding'), 2000);
     return () => clearTimeout(timer);
   }, []);
 
+  // IndexedDB operations
   const loadSpaces = async () => {
     try {
       setIsSyncing(true);
-      const data = await OrdoBackend.getAllSpaces();
-      setSavedSpaces(data);
+      const spaces = await OrdoBackend.getAllSpaces();
+      setSavedSpaces(spaces);
     } catch (e) {
       console.error("Failed to load spaces", e);
     } finally {
@@ -146,15 +148,33 @@ const App: React.FC = () => {
   };
 
   const handleDeleteSpace = async (id: string, e: React.MouseEvent) => {
-    e.stopPropagation(); // Prevent triggering the card click
+    e.stopPropagation();
     if (confirm("Are you sure you want to delete this space?")) {
       try {
         await OrdoBackend.deleteSpace(id);
-        await loadSpaces(); // Reload spaces after deletion
+        await loadSpaces();
       } catch (error) {
         console.error("Failed to delete space:", error);
         alert("Failed to delete space. Please try again.");
       }
+    }
+  };
+
+  const handleSaveToLibrary = async () => {
+    if (!afterImage) return;
+    try {
+      const space: SavedSpace = {
+        id: Date.now().toString(),
+        name: tempName || `Space ${new Date().toLocaleDateString()}`,
+        date: new Date().toISOString(),
+        image: afterImage,
+      };
+      await OrdoBackend.saveSpace(space);
+      await loadSpaces();
+      setScreen('library');
+    } catch (error) {
+      console.error("Failed to save space:", error);
+      alert("Failed to save space. Please try again.");
     }
   };
 
@@ -198,77 +218,158 @@ const App: React.FC = () => {
     }
   };
 
+  // Helper function to call Gemini API directly
+  const callGeminiAPI = async (type: 'inspiration' | 'processing', data: {
+    imageData?: string;
+    prompt: string;
+    style?: string;
+  }) => {
+    const apiKey = process.env.GEMINI_API_KEY || process.env.API_KEY || '';
+    if (!apiKey) {
+      throw new Error('GEMINI_API_KEY not found in .env.local. Please add it and restart the server.');
+    }
+
+    try {
+      const genAI = new GoogleGenerativeAI(apiKey);
+      const model = genAI.getGenerativeModel({ model: 'gemini-2.5-flash-image' });
+
+      let result;
+
+      if (type === 'inspiration') {
+        // Text-to-image generation for Dream Space
+        const systemInstruction = "You are a professional interior designer. Generate a high-resolution, professional interior design visualization. The image should be from an eye-level perspective, minimalist and clean, with no humans. Focus on the organized space described.";
+        const fullPrompt = `${systemInstruction}\n\nUser's dream space: ${data.prompt}`;
+
+        result = await model.generateContent({
+          contents: [{ parts: [{ text: fullPrompt }] }],
+        });
+      } else {
+        // Image-to-image generation for processing
+        const optimizedPrompt = `Professional organizer. Transform this BEFORE photo into an organized AFTER image.
+
+Style: ${data.style}
+- Calm Minimal: Sparse surfaces, hidden storage, neutral tones.
+- Aesthetic: Curated displays, balanced colors.
+- Practical: Items grouped by utility, visible but tidy storage.
+- Compact: Maximum vertical space, nested items.
+
+Requirements:
+- Keep same furniture and perspective.
+- Declutter: fold, stack, group loose items.
+- Hide cables and visual noise.
+- Clean surfaces, minimalist, no humans.
+- Professional interior design visualization, eye-level perspective.
+
+Then provide 5 organizing steps in JSON:
+{
+  "steps": [
+    { "title": "Step 1", "description": "Description 1" },
+    { "title": "Step 2", "description": "Description 2" },
+    { "title": "Step 3", "description": "Description 3" },
+    { "title": "Step 4", "description": "Description 4" },
+    { "title": "Step 5", "description": "Description 5" }
+  ]
+}`;
+
+        // Convert base64 data URL to base64 string if needed
+        const base64Data = data.imageData?.includes(',') ? data.imageData.split(',')[1] : data.imageData || '';
+
+        result = await model.generateContent({
+          contents: [
+            {
+              parts: [
+                { inlineData: { data: base64Data, mimeType: 'image/jpeg' } },
+                { text: optimizedPrompt },
+              ],
+            },
+          ],
+        });
+      }
+
+      // Parse response
+      const response = result.response;
+      const parts = response.candidates?.[0]?.content?.parts || [];
+
+      let generatedImage = null;
+      let generatedText = '';
+      let steps = null;
+
+      for (const part of parts) {
+        if (part.inlineData) {
+          generatedImage = `data:image/jpeg;base64,${part.inlineData.data}`;
+        } else if (part.text) {
+          generatedText += part.text;
+        }
+      }
+
+      // Try to parse steps from text if it's JSON
+      if (generatedText) {
+        try {
+          const jsonMatch = generatedText.match(/\{[\s\S]*"steps"[\s\S]*\}/);
+          if (jsonMatch) {
+            steps = JSON.parse(jsonMatch[0]);
+          }
+        } catch (e) {
+          console.error('Failed to parse steps JSON:', e);
+        }
+      }
+
+      return {
+        success: true,
+        image: generatedImage,
+        text: generatedText,
+        steps: steps?.steps || null,
+      };
+    } catch (error: any) {
+      console.error('❌ Gemini API error:', error);
+      const errorMessage = error.message || 'Unknown error occurred';
+      
+      // Parse error if it's a JSON string
+      if (typeof errorMessage === 'string' && errorMessage.includes('{')) {
+        try {
+          const parsed = JSON.parse(errorMessage);
+          if (parsed.error) {
+            throw new Error(parsed.error.message || parsed.error);
+          }
+        } catch (e) {
+          // Not JSON, use original message
+        }
+      }
+      
+      throw new Error(errorMessage);
+    }
+  };
+
   const handleProcessing = async (style: OrganizingStyle) => {
     setSelectedStyle(style);
     setScreen('processing');
+    
     try {
-      // Check for API key
-      const apiKey = process.env.API_KEY || process.env.GEMINI_API_KEY || '';
-      const apiKeyStr = String(apiKey).trim();
-      
-      // Debug: Log what we're seeing (first few chars only for security)
-      console.log("🔍 API Key Check:", {
-        hasApiKey: !!apiKey,
-        apiKeyLength: apiKeyStr.length,
-        apiKeyPreview: apiKeyStr ? `${apiKeyStr.substring(0, 10)}...` : 'NOT FOUND',
-        isPlaceholder: apiKeyStr === 'your_api_key_here',
-        processEnvApiKey: process.env.API_KEY ? `${String(process.env.API_KEY).substring(0, 10)}...` : 'undefined',
-        processEnvGeminiKey: process.env.GEMINI_API_KEY ? `${String(process.env.GEMINI_API_KEY).substring(0, 10)}...` : 'undefined',
-      });
-      
-      // In Vite, undefined env vars become the string "undefined"
-      if (!apiKeyStr || 
-          apiKeyStr === 'undefined' || 
-          apiKeyStr === 'null' || 
-          apiKeyStr === 'your_api_key_here' || 
-          apiKeyStr.length < 20) { // Gemini API keys are usually longer than 20 chars
-        const errorMsg = apiKeyStr === 'your_api_key_here' 
-          ? "⚠️ Please replace 'your_api_key_here' in .env.local with your actual API key from https://aistudio.google.com/app/apikey"
-          : "⚠️ API key not found or invalid. Please create/update .env.local file with:\n\nGEMINI_API_KEY=your_actual_key_here\n\nGet your key: https://aistudio.google.com/app/apikey\n\nThen restart the dev server!";
-        
-        console.error("❌ API key validation failed:", errorMsg);
-        alert(errorMsg);
-        setScreen('style-selection');
-        return;
-      }
-
-      // Optimize image: compress and resize if too large for faster processing
-      let base64Data = capturedImage?.split(',')[1];
-      if (!base64Data) {
+      if (!capturedImage) {
         throw new Error("No image data available");
       }
 
-      // Compress image if it's too large (reduce base64 size for faster API calls)
-      if (base64Data.length > 500000) { // ~375KB base64 = ~500KB original
+      // Optimize image: compress and resize if too large
+      let base64Data = capturedImage.split(',')[1];
+      if (base64Data.length > 500000) {
         console.log("Image is large, compressing for faster processing...");
         const img = new Image();
-        img.src = capturedImage!;
+        img.src = capturedImage;
         await new Promise((resolve) => {
           img.onload = resolve;
         });
         const canvas = document.createElement('canvas');
-        const maxDimension = 1024; // Reduce to max 1024px for faster processing
+        const maxDimension = 1024;
         const scale = Math.min(1, maxDimension / Math.max(img.width, img.height));
         canvas.width = img.width * scale;
         canvas.height = img.height * scale;
         const ctx = canvas.getContext('2d');
         if (ctx) {
           ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-          base64Data = canvas.toDataURL('image/jpeg', 0.75).split(',')[1]; // Lower quality for speed
-          console.log("Image compressed:", base64Data.length, "bytes");
+          base64Data = canvas.toDataURL('image/jpeg', 0.75).split(',')[1];
         }
       }
 
-      console.log("Initializing GoogleGenAI with API key:", apiKeyStr.substring(0, 10) + "...");
-      const ai = new GoogleGenAI({ apiKey: apiKeyStr });
-
-      console.log("Calling Gemini API with model: gemini-2.5-flash-image");
-      console.log("Base64 data length:", base64Data.length);
-      
-      // Use gemini-2.5-flash-image to generate both the after image and organizing steps
-      const modelName = 'gemini-2.5-flash-image';
-      
-      // Optimized prompt: shorter and focused for faster generation
       const prompt = `Professional organizer. Transform this BEFORE photo into an organized AFTER image.
 
 Style: ${style}
@@ -294,88 +395,19 @@ Then provide 5 organizing steps in JSON:
     { "title": "Step 5", "description": "Description 5" }
   ]
 }`;
-      
-      // Call the Gemini API - request both image generation and steps
+
       const startTime = Date.now();
-      const response = await ai.models.generateContent({
-        model: modelName,
-        contents: {
-          parts: [
-            { inlineData: { data: base64Data, mimeType: 'image/jpeg' } },
-            { text: prompt }
-          ]
-        }
+      const result = await callGeminiAPI('processing', {
+        imageData: base64Data,
+        prompt,
+        style,
       });
       const elapsedTime = ((Date.now() - startTime) / 1000).toFixed(1);
       console.log(`✅ API call completed in ${elapsedTime}s`);
 
-      console.log("API response received:", response);
-      console.log("Response structure:", {
-        hasCandidates: !!response.candidates,
-        candidatesLength: response.candidates?.length || 0,
-        firstCandidate: response.candidates?.[0] ? {
-          hasContent: !!response.candidates[0].content,
-          hasParts: !!response.candidates[0].content?.parts,
-          partsLength: response.candidates[0].content?.parts?.length || 0
-        } : 'none'
-      });
-
-      let genImg = null;
-      let genTxt = "";
-      const parts = response.candidates?.[0]?.content?.parts || [];
+      const parsedSteps: OrganizingStep[] = result.steps || [];
       
-      console.log("Processing response parts:", parts.length);
-      for (const part of parts) {
-        console.log("Processing part:", {
-          hasInlineData: !!part.inlineData,
-          hasText: !!part.text,
-          partKeys: Object.keys(part)
-        });
-        
-        if (part.inlineData) {
-          genImg = `data:image/jpeg;base64,${part.inlineData.data}`;
-          console.log("✅ Generated image found, size:", part.inlineData.data?.length || 0, "chars");
-        } else if (part.text) {
-          genTxt += part.text;
-          console.log("✅ Generated text received:", part.text.substring(0, 100) + "...");
-        }
-      }
-      
-      console.log("Extraction results:", {
-        hasGeneratedImage: !!genImg,
-        hasGeneratedText: !!genTxt,
-        textLength: genTxt.length
-      });
-
-      let parsedSteps: OrganizingStep[] = [];
-      
-      // Parse steps from JSON in the text response
-      if (genTxt) {
-        try {
-          const jsonMatch = genTxt.match(/\{[\s\S]*\}/);
-          if (jsonMatch) {
-            const data = JSON.parse(jsonMatch[0]);
-            parsedSteps = data.steps || [];
-            console.log("✅ Parsed steps:", parsedSteps.length);
-          }
-        } catch (e) {
-          console.error("JSON parse failed", e, "Raw text:", genTxt.substring(0, 200));
-        }
-      }
-
-      // Check if we got an image from Gemini
-      if (!genImg) {
-        console.warn("⚠️ No image generated from Gemini. Falling back to original image.");
-      } else {
-        console.log("✅ After image generated successfully by Gemini");
-      }
-
-      if (parsedSteps.length !== 5) {
-        console.warn("Expected 5 steps but got", parsedSteps.length, "using fallback");
-      }
-
-      // Use generated image or fall back to original
-      setAfterImage(genImg || capturedImage);
+      setAfterImage(result.image || capturedImage);
       setSteps(parsedSteps.length === 5 ? parsedSteps : [
         { title: "Define Functional Zones", description: "Identify primary purposes for each surface area." },
         { title: "Align and Rectify", description: "Straighten objects to parallel the furniture lines." },
@@ -386,104 +418,16 @@ Then provide 5 organizing steps in JSON:
       setScreen('result');
     } catch (error: any) {
       console.error("AI Generation failed:", error);
-      console.error("Error details:", error?.message, error?.response, error?.stack);
+      const errorMsg = error?.message || error?.error || "Unknown error occurred";
       
-      // Parse error for user-friendly message
-      let errorMsg = error?.message || error?.toString() || "Unknown error occurred";
-      let retrySeconds = null;
-      
-      // Check if it's a quota error
-      if (error?.error?.code === 429 || errorMsg.includes("429") || errorMsg.includes("quota") || errorMsg.includes("RESOURCE_EXHAUSTED")) {
-        // Try to extract retry delay from error
-        try {
-          const errorObj = typeof error === 'string' ? JSON.parse(error) : error;
-          const retryDelay = errorObj?.error?.details?.find((d: any) => d["@type"]?.includes("RetryInfo"))?.retryDelay;
-          if (retryDelay) {
-            retrySeconds = Math.ceil(parseFloat(retryDelay.replace('s', '')) || 0);
-          }
-        } catch (e) {
-          // Ignore parsing errors
-        }
-        
-        const retryMsg = retrySeconds ? `\n\n⏱️ Please retry in ${retrySeconds} seconds.` : "\n\n⏱️ Please wait a minute and try again.";
-        const quotaMsg = `⚠️ API Quota Exceeded\n\nYou've reached the free tier limit. ${retryMsg}\n\n💡 Options:\n• Wait and try again later\n• Check usage: https://ai.dev/rate-limit\n• Review quotas: https://ai.google.dev/gemini-api/docs/rate-limits`;
-        
-        alert(quotaMsg);
-        setAfterImage(capturedImage);
-        setScreen('result');
-        return;
-      }
-      
-      // Try to parse error if it's a JSON string or stringified object
-      let parsedError = error;
-      let errorString = '';
-      
-      // Handle different error formats
-      if (typeof error === 'string') {
-        errorString = error;
-        // Try to parse if it looks like JSON
-        if (error.trim().startsWith('{') || error.trim().startsWith('[')) {
-          try {
-            parsedError = JSON.parse(error);
-          } catch (e) {
-            // Not valid JSON, use as string
-          }
-        }
-      } else if (error && typeof error === 'object') {
-        // If error has a toString that returns JSON, parse it
-        errorString = error.toString();
-        if (errorString.includes('{"error"') || errorString.includes('"code":400')) {
-          try {
-            parsedError = JSON.parse(errorString);
-          } catch (e) {
-            // Try to extract JSON from the string
-            const jsonMatch = errorString.match(/\{[\s\S]*\}/);
-            if (jsonMatch) {
-              try {
-                parsedError = JSON.parse(jsonMatch[0]);
-              } catch (e2) {
-                // Couldn't parse, use original
-              }
-            }
-          }
-        }
-      }
-      
-      // Check for authentication errors (400 = invalid API key, 401/403 = auth errors)
-      const errorObj = parsedError?.error || parsedError;
-      const errorCode = errorObj?.code || parsedError?.code || error?.code;
-      const errorMessage = errorObj?.message || parsedError?.message || error?.message || '';
-      const errorStatus = errorObj?.status || parsedError?.status || error?.status;
-      const errorReason = errorObj?.details?.[0]?.reason || errorObj?.reason || '';
-      
-      // Also check the string representation
-      const hasApiKeyErrorInString = errorString.includes("API key") || 
-                                      errorString.includes("API_KEY_INVALID") ||
-                                      errorString.includes("INVALID_ARGUMENT");
-      
-      // Check for API key invalid errors
-      const isApiKeyError = 
-        (errorCode === 400 || errorStatus === "INVALID_ARGUMENT" || hasApiKeyErrorInString) &&
-        (errorMessage.includes("API key") || 
-         errorMessage.includes("API_KEY_INVALID") ||
-         errorReason === "API_KEY_INVALID" ||
-         errorMessage.toLowerCase().includes("invalid api key") ||
-         errorString.includes("API key not valid"));
-      
-      if (isApiKeyError) {
-        alert(`⚠️ Invalid API Key\n\nThe API key in .env.local is not valid or has expired. Please:\n\n1. Get a new API key from: https://aistudio.google.com/app/apikey\n2. Update .env.local with: GEMINI_API_KEY=your_new_key_here\n3. Restart the dev server (stop and run npm run dev again)`);
-        setScreen('style-selection');
-        return;
-      }
-      
-      if (errorMsg.includes("API key") || errorMsg.includes("401") || errorMsg.includes("403") || errorCode === 401 || errorCode === 403) {
+      if (errorMsg.includes("quota") || errorMsg.includes("429")) {
+        alert(`⚠️ API Quota Exceeded\n\nPlease wait a minute and try again.`);
+      } else if (errorMsg.includes("API key not valid") || errorMsg.includes("INVALID_ARGUMENT")) {
         alert(`⚠️ API Authentication Error\n\n${errorMsg}\n\nPlease check your GEMINI_API_KEY in .env.local`);
-        setScreen('style-selection');
-        return;
+      } else {
+        alert(`⚠️ Image Generation Failed\n\n${errorMsg}`);
       }
       
-      // Generic error
-      alert(`⚠️ Image Generation Failed\n\n${errorMsg}\n\nCheck the browser console (F12) for details.`);
       setAfterImage(capturedImage);
       setScreen('result');
     }
@@ -499,169 +443,43 @@ Then provide 5 organizing steps in JSON:
 
     setIsGeneratingInspiration(true);
     setScreen('processing');
+    
     try {
-      // Check for API key
-      const apiKey = process.env.API_KEY || process.env.GEMINI_API_KEY || '';
-      const apiKeyStr = String(apiKey).trim();
-      
-      if (!apiKeyStr || apiKeyStr === 'undefined' || apiKeyStr === 'null' || apiKeyStr === 'your_api_key_here' || apiKeyStr.length < 20) {
-        alert("⚠️ API key not found. Please add GEMINI_API_KEY to .env.local");
-        setScreen('inspiration');
-        setIsGeneratingInspiration(false);
-        return;
-      }
-
-      console.log("🎨 Generating inspiration image with gemini-2.5-flash-image");
-      const ai = new GoogleGenAI({ apiKey: apiKeyStr });
-
-      // System instruction for high-quality interior design visualization
-      const systemInstruction = "You are a professional interior designer. Generate a high-resolution, professional interior design visualization. The image should be from an eye-level perspective, minimalist and clean, with no humans. Focus on the organized space described.";
-      
-      const fullPrompt = `${systemInstruction}\n\nUser's dream space: ${inspirationPrompt}`;
-
-      const response = await ai.models.generateContent({
-        model: 'gemini-2.5-flash-image',
-        contents: {
-          parts: [
-            { text: fullPrompt }
-          ]
-        }
+      const result = await callGeminiAPI('inspiration', {
+        prompt: inspirationPrompt,
       });
 
-      console.log("API response received:", response);
-
-      let genImg = null;
-      const parts = response.candidates?.[0]?.content?.parts || [];
-      
-      console.log("Processing response parts:", parts.length);
-      for (const part of parts) {
-        if (part.inlineData) {
-          genImg = `data:image/jpeg;base64,${part.inlineData.data}`;
-          console.log("✅ Generated inspiration image found");
-          break;
-        }
+      if (!result.image) {
+        throw new Error("No image generated");
       }
 
-      if (genImg) {
-        setAfterImage(genImg);
-        setCapturedImage(genImg); // Use same image for before/after since it's a dream space
-        setViewMode('after');
-        // Set default steps for dream space
-        setSteps([
-          { title: "Visualize Your Space", description: "This is your dream space visualization. Use it as inspiration for organizing." },
-          { title: "Identify Key Elements", description: "Note the organizational principles shown in this design." },
-          { title: "Plan Your Layout", description: "Consider how to apply these concepts to your actual space." },
-          { title: "Start Small", description: "Begin with one area that matches this vision." },
-          { title: "Maintain Progress", description: "Keep this image as a reference for your organizing journey." }
-        ]);
-        setSelectedStyle('Aesthetic'); // Default style for dream spaces
-        setIsGeneratingInspiration(false);
-        setScreen('result');
-      } else {
-        throw new Error("No image generated from Gemini");
-      }
+      setAfterImage(result.image);
+      setCapturedImage(result.image);
+      setViewMode('after');
+      setSteps([
+        { title: "Visualize Your Space", description: "This is your dream space visualization. Use it as inspiration for organizing." },
+        { title: "Identify Key Elements", description: "Note the organizational principles shown in this design." },
+        { title: "Plan Your Layout", description: "Consider how to apply these concepts to your actual space." },
+        { title: "Start Small", description: "Begin with one area that matches this vision." },
+        { title: "Maintain Progress", description: "Keep this image as a reference for your organizing journey." }
+      ]);
+      setSelectedStyle('Aesthetic');
+      setIsGeneratingInspiration(false);
+      setScreen('result');
     } catch (error: any) {
       console.error("Inspiration generation failed:", error);
+      const errorMsg = error?.message || error?.error || "Unknown error occurred";
       
-      // Try to parse error if it's a JSON string or stringified object
-      let parsedError = error;
-      let errorString = '';
-      
-      // Handle different error formats
-      if (typeof error === 'string') {
-        errorString = error;
-        // Try to parse if it looks like JSON
-        if (error.trim().startsWith('{') || error.trim().startsWith('[')) {
-          try {
-            parsedError = JSON.parse(error);
-          } catch (e) {
-            // Not valid JSON, use as string
-          }
-        }
-      } else if (error && typeof error === 'object') {
-        // If error has a toString that returns JSON, parse it
-        errorString = error.toString();
-        if (errorString.includes('{"error"') || errorString.includes('"code":400')) {
-          try {
-            parsedError = JSON.parse(errorString);
-          } catch (e) {
-            // Try to extract JSON from the string
-            const jsonMatch = errorString.match(/\{[\s\S]*\}/);
-            if (jsonMatch) {
-              try {
-                parsedError = JSON.parse(jsonMatch[0]);
-              } catch (e2) {
-                // Couldn't parse, use original
-              }
-            }
-          }
-        }
+      if (errorMsg.includes("API key not valid") || errorMsg.includes("INVALID_ARGUMENT")) {
+        alert(`⚠️ API Authentication Error\n\n${errorMsg}\n\nPlease check your GEMINI_API_KEY in .env.local`);
+      } else {
+        alert(`⚠️ Failed to generate inspiration image\n\n${errorMsg}`);
       }
-      
-      // Check for API key errors - handle multiple error object formats
-      const errorObj = parsedError?.error || parsedError;
-      const errorCode = errorObj?.code || parsedError?.code || error?.code;
-      const errorMessage = errorObj?.message || parsedError?.message || error?.message || '';
-      const errorStatus = errorObj?.status || parsedError?.status || error?.status;
-      const errorReason = errorObj?.details?.[0]?.reason || errorObj?.reason || '';
-      
-      // Also check the string representation
-      const hasApiKeyErrorInString = errorString.includes("API key") || 
-                                      errorString.includes("API_KEY_INVALID") ||
-                                      errorString.includes("INVALID_ARGUMENT");
-      
-      // Check for API key invalid errors
-      const isApiKeyError = 
-        (errorCode === 400 || errorStatus === "INVALID_ARGUMENT" || hasApiKeyErrorInString) &&
-        (errorMessage.includes("API key") || 
-         errorMessage.includes("API_KEY_INVALID") ||
-         errorReason === "API_KEY_INVALID" ||
-         errorMessage.toLowerCase().includes("invalid api key") ||
-         errorString.includes("API key not valid"));
-      
-      if (isApiKeyError) {
-        alert(`⚠️ Invalid API Key\n\nThe API key in .env.local is not valid or has expired. Please:\n\n1. Get a new API key from: https://aistudio.google.com/app/apikey\n2. Update .env.local with: GEMINI_API_KEY=your_new_key_here\n3. Restart the dev server (stop and run npm run dev again)`);
-        setIsGeneratingInspiration(false);
-        setScreen('inspiration');
-        return;
-      }
-      
-      // Check for quota errors
-      if (errorCode === 429 || errorStatus === "RESOURCE_EXHAUSTED" || errorMessage.includes("quota") || errorString.includes("quota")) {
-        alert(`⚠️ API Quota Exceeded\n\nYou've reached the free tier limit. Please wait and try again later.\n\nCheck usage: https://ai.dev/rate-limit`);
-        setIsGeneratingInspiration(false);
-        setScreen('inspiration');
-        return;
-      }
-      
-      // Generic error with better formatting
-      const userMessage = errorMessage || errorString || error?.toString() || "Unknown error occurred";
-      alert(`⚠️ Failed to generate inspiration image\n\n${userMessage}\n\nPlease check your API key and try again.`);
       setIsGeneratingInspiration(false);
       setScreen('inspiration');
     }
   };
 
-  const handleSaveToLibrary = async () => {
-    if (!afterImage) return;
-    const newSpace: SavedSpace = {
-      id: Date.now().toString(),
-      name: `Space ${savedSpaces.length + 1}`,
-      date: new Date().toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }),
-      image: afterImage,
-    };
-    
-    try {
-      setIsSyncing(true);
-      await OrdoBackend.saveSpace(newSpace);
-      await loadSpaces();
-      setScreen('home');
-    } catch (e) {
-      console.error("Failed to save space", e);
-    } finally {
-      setIsSyncing(false);
-    }
-  };
 
   const renderScreen = () => {
     switch (screen) {

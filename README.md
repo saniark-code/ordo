@@ -10,27 +10,28 @@ View your app in AI Studio: https://ai.studio/apps/drive/1iHcfjZOSSUBmOOPJPiZwVP
 
 ## Run Locally
 
-**Prerequisites:**  Node.js
+**Prerequisites:**  Node.js and a Gemini API key
 
+### Quick Start
 
-1. Install dependencies:
+1. **Install dependencies:**
    ```bash
    npm install
    ```
 
-2. Create a `.env.local` file in the root directory and add your API keys:
+2. **Create a `.env.local` file** in the root directory:
    ```bash
+   # Gemini API (required)
    GEMINI_API_KEY=your_actual_api_key_here
-   REPLICATE_API_TOKEN=your_replicate_token_here
    ```
    
-   **Get your API keys:**
-   - **Gemini API key:** Visit [Google AI Studio](https://aistudio.google.com/app/apikey) to get your free API key
-   - **Replicate API token (for image generation):** Visit [Replicate](https://replicate.com/account/api-tokens) to get your free API token
+   **Get your API key:**
+   - Visit [Google AI Studio](https://aistudio.google.com/app/apikey) to get your free API key
+   - Copy the key and paste it into `.env.local`
    
-   **Note:** Image generation requires a Replicate API token. Without it, the app will show organizing steps but use your original image for the "after" view.
+   **Note:** The API key is stored in `.env.local` which is git-ignored for security.
 
-3. Run the app:
+3. **Run the app:**
    ```bash
    npm run dev
    ```

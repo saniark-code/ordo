@@ -14,7 +14,8 @@ export type Screen =
   | 'completion' 
   | 'save-space' 
   | 'library' 
-  | 'settings';
+  | 'settings'
+  | 'inspiration';
 
 export interface SavedSpace {
   id: string;

@@ -174,37 +174,6 @@ const App: React.FC = () => {
     }
   };
 
-  const handleGenerateInspiration = async () => {
-    if (!inspirationPrompt.trim()) return;
-    setIsGeneratingInspiration(true);
-    try {
-      const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
-      const response = await ai.models.generateContent({
-        model: 'gemini-2.5-flash-image',
-        contents: `Generate a high-fidelity, high-resolution interior design visualization of a perfectly organized and minimalist space. Description: ${inspirationPrompt}. The image should feel calm, clean, and professional. Ensure realistic lighting and textures. No human faces or text. Perspective should be eye-level. Style: Minimalist Organizers.`,
-      });
-
-      let genImg = null;
-      const parts = response.candidates?.[0]?.content?.parts || [];
-      for (const part of parts) {
-        if (part.inlineData) {
-          genImg = `data:image/jpeg;base64,${part.inlineData.data}`;
-          break;
-        }
-      }
-
-      if (genImg) {
-        setAfterImage(genImg);
-        setCapturedImage(genImg); // In moodboard mode, before/after is the same initially
-        setScreen('result');
-      }
-    } catch (error) {
-      console.error("Moodboard generation failed", error);
-    } finally {
-      setIsGeneratingInspiration(false);
-    }
-  };
-
   const handleProcessing = async (style: OrganizingStyle) => {
     setSelectedStyle(style);
     setScreen('processing');
@@ -329,7 +298,6 @@ Output format: Generate the AFTER image, then provide the steps in JSON format:
           genTxt += part.text;
           console.log("✅ Generated text received:", part.text.substring(0, 100) + "...");
         }
-      }
       }
       
       console.log("Extraction results:", {

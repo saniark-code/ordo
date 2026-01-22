@@ -63,11 +63,22 @@ const OrdoBackend = {
       };
       getRequest.onerror = () => reject(getRequest.error);
     });
+  },
+
+  async deleteSpace(id: string): Promise<void> {
+    const db = await this.init() as IDBDatabase;
+    return new Promise((resolve, reject) => {
+      const transaction = db.transaction(this.storeName, 'readwrite');
+      const store = transaction.objectStore(this.storeName);
+      const request = store.delete(id);
+      request.onsuccess = () => resolve();
+      request.onerror = () => reject(request.error);
+    });
   }
 };
 
 const HOME_CATEGORIES = [
-  { name: 'Dream', icon: <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5"><path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/><circle cx="12" cy="12" r="3"/></svg>, screen: 'inspiration' },
+  { name: 'Dream Space', icon: <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5"><path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/><circle cx="12" cy="12" r="3"/></svg>, screen: 'inspiration' },
   { name: 'Scan Workspace', icon: <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"/><line x1="2" y1="20" x2="22" y2="20"/><path d="M12 17v3"/></svg>, screen: 'scan' },
   { name: 'Wardrobe', icon: <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5"><rect x="3" y="2" width="18" height="20" rx="2"/><line x1="12" y1="2" x2="12" y2="22"/><path d="M3 7h18"/></svg>, screen: 'scan' },
   { name: 'Living Room', icon: <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><path d="M9 22V12h6v10"/></svg>, screen: 'scan' },
@@ -131,6 +142,19 @@ const App: React.FC = () => {
       console.error("Failed to load spaces", e);
     } finally {
       setIsSyncing(false);
+    }
+  };
+
+  const handleDeleteSpace = async (id: string, e: React.MouseEvent) => {
+    e.stopPropagation(); // Prevent triggering the card click
+    if (confirm("Are you sure you want to delete this space?")) {
+      try {
+        await OrdoBackend.deleteSpace(id);
+        await loadSpaces(); // Reload spaces after deletion
+      } catch (error) {
+        console.error("Failed to delete space:", error);
+        alert("Failed to delete space. Please try again.");
+      }
     }
   };
 
@@ -208,9 +232,31 @@ const App: React.FC = () => {
         return;
       }
 
-      const base64Data = capturedImage?.split(',')[1];
+      // Optimize image: compress and resize if too large for faster processing
+      let base64Data = capturedImage?.split(',')[1];
       if (!base64Data) {
         throw new Error("No image data available");
+      }
+
+      // Compress image if it's too large (reduce base64 size for faster API calls)
+      if (base64Data.length > 500000) { // ~375KB base64 = ~500KB original
+        console.log("Image is large, compressing for faster processing...");
+        const img = new Image();
+        img.src = capturedImage!;
+        await new Promise((resolve) => {
+          img.onload = resolve;
+        });
+        const canvas = document.createElement('canvas');
+        const maxDimension = 1024; // Reduce to max 1024px for faster processing
+        const scale = Math.min(1, maxDimension / Math.max(img.width, img.height));
+        canvas.width = img.width * scale;
+        canvas.height = img.height * scale;
+        const ctx = canvas.getContext('2d');
+        if (ctx) {
+          ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+          base64Data = canvas.toDataURL('image/jpeg', 0.75).split(',')[1]; // Lower quality for speed
+          console.log("Image compressed:", base64Data.length, "bytes");
+        }
       }
 
       console.log("Initializing GoogleGenAI with API key:", apiKeyStr.substring(0, 10) + "...");
@@ -222,51 +268,46 @@ const App: React.FC = () => {
       // Use gemini-2.5-flash-image to generate both the after image and organizing steps
       const modelName = 'gemini-2.5-flash-image';
       
+      // Optimized prompt: shorter and focused for faster generation
+      const prompt = `Professional organizer. Transform this BEFORE photo into an organized AFTER image.
+
+Style: ${style}
+- Calm Minimal: Sparse surfaces, hidden storage, neutral tones.
+- Aesthetic: Curated displays, balanced colors.
+- Practical: Items grouped by utility, visible but tidy storage.
+- Compact: Maximum vertical space, nested items.
+
+Requirements:
+- Keep same furniture and perspective.
+- Declutter: fold, stack, group loose items.
+- Hide cables and visual noise.
+- Clean surfaces, minimalist, no humans.
+- Professional interior design visualization, eye-level perspective.
+
+Then provide 5 organizing steps in JSON:
+{
+  "steps": [
+    { "title": "Step 1", "description": "Description 1" },
+    { "title": "Step 2", "description": "Description 2" },
+    { "title": "Step 3", "description": "Description 3" },
+    { "title": "Step 4", "description": "Description 4" },
+    { "title": "Step 5", "description": "Description 5" }
+  ]
+}`;
+      
       // Call the Gemini API - request both image generation and steps
+      const startTime = Date.now();
       const response = await ai.models.generateContent({
         model: modelName,
         contents: {
           parts: [
             { inlineData: { data: base64Data, mimeType: 'image/jpeg' } },
-            { text: `You are a world-class professional organizer and interior designer.  
-
-Input: a BEFORE photo of a real space (desk, room, or shelf).
-Style selected: ${style}.
-
-Task 1: Generate a high-fidelity AFTER image based on the input style.
-- Reorganize the same space, keeping all furniture and major items in place.
-- Style implementation for '${style}':
-  - Calm Minimal: Sparse surfaces, hidden storage, neutral tones, extreme decluttering.
-  - Aesthetic: Curated displays, balanced colors, intentional arrangement of decorative objects.
-  - Practical: Efficiency focused, items grouped by utility, labels where appropriate, visible but tidy storage.
-  - Compact: Maximum usage of vertical space, nested items, minimal visual bulk.
-- Deeply declutter: fold, stack, group, or store loose items.
-- Hide cables, small objects, and visual noise.
-- Maintain negative space and clean surfaces.
-- Preserve realism: same perspective, furniture, walls, and natural lighting.
-- Generate a high-resolution, professional interior design visualization, eye-level perspective, minimalist and clean, no humans.
-
-Task 2: Generate exactly 5 actionable organizing steps:
-- Each step must reference specific visible items, surfaces, or areas from the image.
-- Provide a calm, human, minimal tone.
-- Each step must have:
-  - title: short phrase (max 4 words)
-  - description: 1-2 concise sentences (max 12 words)
-- Steps should be sequential.
-
-Output format: Generate the AFTER image, then provide the steps in JSON format:
-{
-  "steps": [
-    { "title": "Step 1 title", "description": "Step 1 description" },
-    { "title": "Step 2 title", "description": "Step 2 description" },
-    { "title": "Step 3 title", "description": "Step 3 description" },
-    { "title": "Step 4 title", "description": "Step 4 description" },
-    { "title": "Step 5 title", "description": "Step 5 description" }
-  ]
-}` }
+            { text: prompt }
           ]
         }
       });
+      const elapsedTime = ((Date.now() - startTime) / 1000).toFixed(1);
+      console.log(`✅ API call completed in ${elapsedTime}s`);
 
       console.log("API response received:", response);
       console.log("Response structure:", {
@@ -373,8 +414,69 @@ Output format: Generate the AFTER image, then provide the steps in JSON format:
         return;
       }
       
-      // Check for authentication errors
-      if (errorMsg.includes("API key") || errorMsg.includes("401") || errorMsg.includes("403") || error?.error?.code === 401 || error?.error?.code === 403) {
+      // Try to parse error if it's a JSON string or stringified object
+      let parsedError = error;
+      let errorString = '';
+      
+      // Handle different error formats
+      if (typeof error === 'string') {
+        errorString = error;
+        // Try to parse if it looks like JSON
+        if (error.trim().startsWith('{') || error.trim().startsWith('[')) {
+          try {
+            parsedError = JSON.parse(error);
+          } catch (e) {
+            // Not valid JSON, use as string
+          }
+        }
+      } else if (error && typeof error === 'object') {
+        // If error has a toString that returns JSON, parse it
+        errorString = error.toString();
+        if (errorString.includes('{"error"') || errorString.includes('"code":400')) {
+          try {
+            parsedError = JSON.parse(errorString);
+          } catch (e) {
+            // Try to extract JSON from the string
+            const jsonMatch = errorString.match(/\{[\s\S]*\}/);
+            if (jsonMatch) {
+              try {
+                parsedError = JSON.parse(jsonMatch[0]);
+              } catch (e2) {
+                // Couldn't parse, use original
+              }
+            }
+          }
+        }
+      }
+      
+      // Check for authentication errors (400 = invalid API key, 401/403 = auth errors)
+      const errorObj = parsedError?.error || parsedError;
+      const errorCode = errorObj?.code || parsedError?.code || error?.code;
+      const errorMessage = errorObj?.message || parsedError?.message || error?.message || '';
+      const errorStatus = errorObj?.status || parsedError?.status || error?.status;
+      const errorReason = errorObj?.details?.[0]?.reason || errorObj?.reason || '';
+      
+      // Also check the string representation
+      const hasApiKeyErrorInString = errorString.includes("API key") || 
+                                      errorString.includes("API_KEY_INVALID") ||
+                                      errorString.includes("INVALID_ARGUMENT");
+      
+      // Check for API key invalid errors
+      const isApiKeyError = 
+        (errorCode === 400 || errorStatus === "INVALID_ARGUMENT" || hasApiKeyErrorInString) &&
+        (errorMessage.includes("API key") || 
+         errorMessage.includes("API_KEY_INVALID") ||
+         errorReason === "API_KEY_INVALID" ||
+         errorMessage.toLowerCase().includes("invalid api key") ||
+         errorString.includes("API key not valid"));
+      
+      if (isApiKeyError) {
+        alert(`⚠️ Invalid API Key\n\nThe API key in .env.local is not valid or has expired. Please:\n\n1. Get a new API key from: https://aistudio.google.com/app/apikey\n2. Update .env.local with: GEMINI_API_KEY=your_new_key_here\n3. Restart the dev server (stop and run npm run dev again)`);
+        setScreen('style-selection');
+        return;
+      }
+      
+      if (errorMsg.includes("API key") || errorMsg.includes("401") || errorMsg.includes("403") || errorCode === 401 || errorCode === 403) {
         alert(`⚠️ API Authentication Error\n\n${errorMsg}\n\nPlease check your GEMINI_API_KEY in .env.local`);
         setScreen('style-selection');
         return;
@@ -460,7 +562,81 @@ Output format: Generate the AFTER image, then provide the steps in JSON format:
       }
     } catch (error: any) {
       console.error("Inspiration generation failed:", error);
-      alert(`⚠️ Failed to generate inspiration image: ${error.message || error.toString()}`);
+      
+      // Try to parse error if it's a JSON string or stringified object
+      let parsedError = error;
+      let errorString = '';
+      
+      // Handle different error formats
+      if (typeof error === 'string') {
+        errorString = error;
+        // Try to parse if it looks like JSON
+        if (error.trim().startsWith('{') || error.trim().startsWith('[')) {
+          try {
+            parsedError = JSON.parse(error);
+          } catch (e) {
+            // Not valid JSON, use as string
+          }
+        }
+      } else if (error && typeof error === 'object') {
+        // If error has a toString that returns JSON, parse it
+        errorString = error.toString();
+        if (errorString.includes('{"error"') || errorString.includes('"code":400')) {
+          try {
+            parsedError = JSON.parse(errorString);
+          } catch (e) {
+            // Try to extract JSON from the string
+            const jsonMatch = errorString.match(/\{[\s\S]*\}/);
+            if (jsonMatch) {
+              try {
+                parsedError = JSON.parse(jsonMatch[0]);
+              } catch (e2) {
+                // Couldn't parse, use original
+              }
+            }
+          }
+        }
+      }
+      
+      // Check for API key errors - handle multiple error object formats
+      const errorObj = parsedError?.error || parsedError;
+      const errorCode = errorObj?.code || parsedError?.code || error?.code;
+      const errorMessage = errorObj?.message || parsedError?.message || error?.message || '';
+      const errorStatus = errorObj?.status || parsedError?.status || error?.status;
+      const errorReason = errorObj?.details?.[0]?.reason || errorObj?.reason || '';
+      
+      // Also check the string representation
+      const hasApiKeyErrorInString = errorString.includes("API key") || 
+                                      errorString.includes("API_KEY_INVALID") ||
+                                      errorString.includes("INVALID_ARGUMENT");
+      
+      // Check for API key invalid errors
+      const isApiKeyError = 
+        (errorCode === 400 || errorStatus === "INVALID_ARGUMENT" || hasApiKeyErrorInString) &&
+        (errorMessage.includes("API key") || 
+         errorMessage.includes("API_KEY_INVALID") ||
+         errorReason === "API_KEY_INVALID" ||
+         errorMessage.toLowerCase().includes("invalid api key") ||
+         errorString.includes("API key not valid"));
+      
+      if (isApiKeyError) {
+        alert(`⚠️ Invalid API Key\n\nThe API key in .env.local is not valid or has expired. Please:\n\n1. Get a new API key from: https://aistudio.google.com/app/apikey\n2. Update .env.local with: GEMINI_API_KEY=your_new_key_here\n3. Restart the dev server (stop and run npm run dev again)`);
+        setIsGeneratingInspiration(false);
+        setScreen('inspiration');
+        return;
+      }
+      
+      // Check for quota errors
+      if (errorCode === 429 || errorStatus === "RESOURCE_EXHAUSTED" || errorMessage.includes("quota") || errorString.includes("quota")) {
+        alert(`⚠️ API Quota Exceeded\n\nYou've reached the free tier limit. Please wait and try again later.\n\nCheck usage: https://ai.dev/rate-limit`);
+        setIsGeneratingInspiration(false);
+        setScreen('inspiration');
+        return;
+      }
+      
+      // Generic error with better formatting
+      const userMessage = errorMessage || errorString || error?.toString() || "Unknown error occurred";
+      alert(`⚠️ Failed to generate inspiration image\n\n${userMessage}\n\nPlease check your API key and try again.`);
       setIsGeneratingInspiration(false);
       setScreen('inspiration');
     }
@@ -540,8 +716,8 @@ Output format: Generate the AFTER image, then provide the steps in JSON format:
                     onClick={() => (cat as any).screen ? setScreen((cat as any).screen as Screen) : setScreen('scan')} 
                     className="aspect-square flex flex-col items-center justify-center p-6 text-center"
                   >
-                    <div className={`text-[#2A2826] opacity-30 mb-4 ${cat.name === 'Dream' ? 'text-[#8EA3A1]' : ''}`}>{cat.icon}</div>
-                    <span className={`text-[10px] font-bold tracking-[0.2em] uppercase ${cat.name === 'Dream' ? 'text-[#8EA3A1]' : 'text-[#2A2826]'}`}>{cat.name}</span>
+                    <div className={`text-[#2A2826] opacity-30 mb-4 ${cat.name === 'Dream Space' ? 'text-[#8EA3A1]' : ''}`}>{cat.icon}</div>
+                    <span className={`text-[10px] font-bold tracking-[0.2em] uppercase ${cat.name === 'Dream Space' ? 'text-[#8EA3A1]' : 'text-[#2A2826]'}`}>{cat.name}</span>
                   </Card>
                 ))}
               </div>
@@ -560,40 +736,6 @@ Output format: Generate the AFTER image, then provide the steps in JSON format:
             </div>
             <div className="p-8 pb-12">
                <Button onClick={() => setScreen('scan')} className="w-full py-6">Begin New Scan</Button>
-            </div>
-          </div>
-        );
-
-      case 'inspiration':
-        return (
-          <div className="flex flex-col h-full bg-white relative">
-            <div className="flex-1 p-8 pt-20 flex flex-col items-center justify-center space-y-12">
-              <button onClick={() => setScreen('home')} className="absolute top-14 left-8 p-3 text-neutral-300">
-                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M19 12H5M12 19l-7-7 7-7"/></svg>
-              </button>
-              <div className="text-center space-y-4">
-                <h1 className="text-4xl font-light text-[#2A2826]">Dream Space</h1>
-                <p className="text-sm text-neutral-400 font-light px-8 leading-relaxed italic">Describe a space, and let Ordo visualize its most organized potential.</p>
-              </div>
-              {isGeneratingInspiration ? (
-                <div className="flex flex-col items-center space-y-6 animate-pulse">
-                  <div className="w-16 h-[1px] bg-neutral-100" />
-                  <p className="text-[10px] font-bold uppercase tracking-[0.4em] text-neutral-300">Dreaming of order...</p>
-                </div>
-              ) : (
-                <div className="w-full max-w-sm">
-                  <input 
-                    type="text" 
-                    placeholder="e.g. A Japandi reading nook..."
-                    value={inspirationPrompt}
-                    onChange={(e) => setInspirationPrompt(e.target.value)}
-                    className="w-full text-center text-xl font-light text-[#2A2826] bg-transparent border-b border-neutral-100 py-4 focus:outline-none focus:border-[#8EA3A1] transition-colors"
-                  />
-                  <div className="mt-12 flex justify-center">
-                    <Button onClick={handleGenerateInspiration} className="w-full">Generate Visualization</Button>
-                  </div>
-                </div>
-              )}
             </div>
           </div>
         );
@@ -783,9 +925,20 @@ Output format: Generate the AFTER image, then provide the steps in JSON format:
               ) : (
                 <div className="grid grid-cols-2 gap-6 pb-20">
                   {savedSpaces.map(space => (
-                    <div key={space.id} className="space-y-3">
-                      <div className="aspect-[3/4] bg-white rounded-[32px] overflow-hidden shadow-sm border border-neutral-100 cursor-pointer" onClick={() => { setAfterImage(space.image); setCapturedImage(space.image); setViewMode('after'); setScreen('result'); }}>
+                    <div key={space.id} className="space-y-3 group">
+                      <div className="aspect-[3/4] bg-white rounded-[32px] overflow-hidden shadow-sm border border-neutral-100 cursor-pointer relative" onClick={() => { setAfterImage(space.image); setCapturedImage(space.image); setViewMode('after'); setScreen('result'); }}>
                         <img src={space.image} className="w-full h-full object-cover" alt={space.name} />
+                        <button
+                          onClick={(e) => handleDeleteSpace(space.id, e)}
+                          className="absolute top-3 right-3 p-2 bg-black/50 hover:bg-black/70 rounded-full opacity-0 group-hover:opacity-100 transition-opacity backdrop-blur-sm"
+                          aria-label="Delete space"
+                        >
+                          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                            <path d="M3 6h18M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>
+                            <line x1="10" y1="11" x2="10" y2="17"/>
+                            <line x1="14" y1="11" x2="14" y2="17"/>
+                          </svg>
+                        </button>
                       </div>
                       <p className="text-[10px] font-bold text-[#2A2826] uppercase tracking-wider truncate px-1">{space.name}</p>
                     </div>

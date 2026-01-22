@@ -67,7 +67,7 @@ const OrdoBackend = {
 };
 
 const HOME_CATEGORIES = [
-  { name: 'Dream', icon: <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5"><path d="M12 3v1m0 16v1m9-9h-1M4 12H3m15.364-6.364l-.707.707M6.343 17.657l-.707.707m12.728 0l-.707-.707M6.343 6.343l-.707-.707M12 8a4 4 0 100 8 4 4 0 000-8z"/></svg>, screen: 'inspiration' },
+  { name: 'Dream', icon: <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5"><path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/><circle cx="12" cy="12" r="3"/></svg>, screen: 'inspiration' },
   { name: 'Scan Workspace', icon: <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"/><line x1="2" y1="20" x2="22" y2="20"/><path d="M12 17v3"/></svg>, screen: 'scan' },
   { name: 'Wardrobe', icon: <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5"><rect x="3" y="2" width="18" height="20" rx="2"/><line x1="12" y1="2" x2="12" y2="22"/><path d="M3 7h18"/></svg>, screen: 'scan' },
   { name: 'Living Room', icon: <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><path d="M9 22V12h6v10"/></svg>, screen: 'scan' },
@@ -110,6 +110,8 @@ const App: React.FC = () => {
   const [steps, setSteps] = useState<OrganizingStep[]>([]);
   const [savedSpaces, setSavedSpaces] = useState<SavedSpace[]>([]);
   const [isSyncing, setIsSyncing] = useState(false);
+  const [editingSpaceId, setEditingSpaceId] = useState<string | null>(null);
+  const [tempName, setTempName] = useState('');
   const [inspirationPrompt, setInspirationPrompt] = useState('');
   const [isGeneratingInspiration, setIsGeneratingInspiration] = useState(false);
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -207,34 +209,163 @@ const App: React.FC = () => {
     setSelectedStyle(style);
     setScreen('processing');
     try {
-      const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
-      const base64Data = capturedImage?.split(',')[1];
-      if (!base64Data) throw new Error("No image data");
+      // Check for API key
+      const apiKey = process.env.API_KEY || process.env.GEMINI_API_KEY || '';
+      const apiKeyStr = String(apiKey).trim();
+      
+      // Debug: Log what we're seeing (first few chars only for security)
+      console.log("🔍 API Key Check:", {
+        hasApiKey: !!apiKey,
+        apiKeyLength: apiKeyStr.length,
+        apiKeyPreview: apiKeyStr ? `${apiKeyStr.substring(0, 10)}...` : 'NOT FOUND',
+        isPlaceholder: apiKeyStr === 'your_api_key_here',
+        processEnvApiKey: process.env.API_KEY ? `${String(process.env.API_KEY).substring(0, 10)}...` : 'undefined',
+        processEnvGeminiKey: process.env.GEMINI_API_KEY ? `${String(process.env.GEMINI_API_KEY).substring(0, 10)}...` : 'undefined',
+      });
+      
+      // In Vite, undefined env vars become the string "undefined"
+      if (!apiKeyStr || 
+          apiKeyStr === 'undefined' || 
+          apiKeyStr === 'null' || 
+          apiKeyStr === 'your_api_key_here' || 
+          apiKeyStr.length < 20) { // Gemini API keys are usually longer than 20 chars
+        const errorMsg = apiKeyStr === 'your_api_key_here' 
+          ? "⚠️ Please replace 'your_api_key_here' in .env.local with your actual API key from https://aistudio.google.com/app/apikey"
+          : "⚠️ API key not found or invalid. Please create/update .env.local file with:\n\nGEMINI_API_KEY=your_actual_key_here\n\nGet your key: https://aistudio.google.com/app/apikey\n\nThen restart the dev server!";
+        
+        console.error("❌ API key validation failed:", errorMsg);
+        alert(errorMsg);
+        setScreen('style-selection');
+        return;
+      }
 
+      const base64Data = capturedImage?.split(',')[1];
+      if (!base64Data) {
+        throw new Error("No image data available");
+      }
+
+      console.log("Initializing GoogleGenAI with API key:", apiKeyStr.substring(0, 10) + "...");
+      const ai = new GoogleGenAI({ apiKey: apiKeyStr });
+
+      console.log("Calling Gemini API with model: gemini-2.5-flash-image");
+      console.log("Base64 data length:", base64Data.length);
+      
+      // Use gemini-2.5-flash-image to generate both the after image and organizing steps
+      const modelName = 'gemini-2.5-flash-image';
+      
+      // Call the Gemini API - request both image generation and steps
       const response = await ai.models.generateContent({
-        model: 'gemini-2.5-flash-image',
+        model: modelName,
         contents: {
           parts: [
             { inlineData: { data: base64Data, mimeType: 'image/jpeg' } },
-            { text: `Professional organizer AI. Style: ${style}. Task: Generate high-fidelity AFTER image of this space rearranged perfectly. Task 2: Return JSON { "steps": [{ "title": "...", "description": "..." }] } with 5 steps.` }
+            { text: `You are a world-class professional organizer and interior designer.  
+
+Input: a BEFORE photo of a real space (desk, room, or shelf).
+Style selected: ${style}.
+
+Task 1: Generate a high-fidelity AFTER image based on the input style.
+- Reorganize the same space, keeping all furniture and major items in place.
+- Style implementation for '${style}':
+  - Calm Minimal: Sparse surfaces, hidden storage, neutral tones, extreme decluttering.
+  - Aesthetic: Curated displays, balanced colors, intentional arrangement of decorative objects.
+  - Practical: Efficiency focused, items grouped by utility, labels where appropriate, visible but tidy storage.
+  - Compact: Maximum usage of vertical space, nested items, minimal visual bulk.
+- Deeply declutter: fold, stack, group, or store loose items.
+- Hide cables, small objects, and visual noise.
+- Maintain negative space and clean surfaces.
+- Preserve realism: same perspective, furniture, walls, and natural lighting.
+- Generate a high-resolution, professional interior design visualization, eye-level perspective, minimalist and clean, no humans.
+
+Task 2: Generate exactly 5 actionable organizing steps:
+- Each step must reference specific visible items, surfaces, or areas from the image.
+- Provide a calm, human, minimal tone.
+- Each step must have:
+  - title: short phrase (max 4 words)
+  - description: 1-2 concise sentences (max 12 words)
+- Steps should be sequential.
+
+Output format: Generate the AFTER image, then provide the steps in JSON format:
+{
+  "steps": [
+    { "title": "Step 1 title", "description": "Step 1 description" },
+    { "title": "Step 2 title", "description": "Step 2 description" },
+    { "title": "Step 3 title", "description": "Step 3 description" },
+    { "title": "Step 4 title", "description": "Step 4 description" },
+    { "title": "Step 5 title", "description": "Step 5 description" }
+  ]
+}` }
           ]
         }
+      });
+
+      console.log("API response received:", response);
+      console.log("Response structure:", {
+        hasCandidates: !!response.candidates,
+        candidatesLength: response.candidates?.length || 0,
+        firstCandidate: response.candidates?.[0] ? {
+          hasContent: !!response.candidates[0].content,
+          hasParts: !!response.candidates[0].content?.parts,
+          partsLength: response.candidates[0].content?.parts?.length || 0
+        } : 'none'
       });
 
       let genImg = null;
       let genTxt = "";
       const parts = response.candidates?.[0]?.content?.parts || [];
+      
+      console.log("Processing response parts:", parts.length);
       for (const part of parts) {
-        if (part.inlineData) genImg = `data:image/jpeg;base64,${part.inlineData.data}`;
-        else if (part.text) genTxt += part.text;
+        console.log("Processing part:", {
+          hasInlineData: !!part.inlineData,
+          hasText: !!part.text,
+          partKeys: Object.keys(part)
+        });
+        
+        if (part.inlineData) {
+          genImg = `data:image/jpeg;base64,${part.inlineData.data}`;
+          console.log("✅ Generated image found, size:", part.inlineData.data?.length || 0, "chars");
+        } else if (part.text) {
+          genTxt += part.text;
+          console.log("✅ Generated text received:", part.text.substring(0, 100) + "...");
+        }
       }
+      }
+      
+      console.log("Extraction results:", {
+        hasGeneratedImage: !!genImg,
+        hasGeneratedText: !!genTxt,
+        textLength: genTxt.length
+      });
 
       let parsedSteps: OrganizingStep[] = [];
-      try {
-        const jsonMatch = genTxt.match(/\{[\s\S]*\}/);
-        if (jsonMatch) parsedSteps = JSON.parse(jsonMatch[0]).steps || [];
-      } catch (e) { console.error("JSON parse failed", e); }
+      
+      // Parse steps from JSON in the text response
+      if (genTxt) {
+        try {
+          const jsonMatch = genTxt.match(/\{[\s\S]*\}/);
+          if (jsonMatch) {
+            const data = JSON.parse(jsonMatch[0]);
+            parsedSteps = data.steps || [];
+            console.log("✅ Parsed steps:", parsedSteps.length);
+          }
+        } catch (e) {
+          console.error("JSON parse failed", e, "Raw text:", genTxt.substring(0, 200));
+        }
+      }
 
+      // Check if we got an image from Gemini
+      if (!genImg) {
+        console.warn("⚠️ No image generated from Gemini. Falling back to original image.");
+      } else {
+        console.log("✅ After image generated successfully by Gemini");
+      }
+
+      if (parsedSteps.length !== 5) {
+        console.warn("Expected 5 steps but got", parsedSteps.length, "using fallback");
+      }
+
+      // Use generated image or fall back to original
       setAfterImage(genImg || capturedImage);
       setSteps(parsedSteps.length === 5 ? parsedSteps : [
         { title: "Define Functional Zones", description: "Identify primary purposes for each surface area." },
@@ -244,10 +375,126 @@ const App: React.FC = () => {
         { title: "Final Polish", description: "Wipe surfaces to emphasize new clean lines." }
       ]);
       setScreen('result');
-    } catch (error) {
+    } catch (error: any) {
       console.error("AI Generation failed:", error);
+      console.error("Error details:", error?.message, error?.response, error?.stack);
+      
+      // Parse error for user-friendly message
+      let errorMsg = error?.message || error?.toString() || "Unknown error occurred";
+      let retrySeconds = null;
+      
+      // Check if it's a quota error
+      if (error?.error?.code === 429 || errorMsg.includes("429") || errorMsg.includes("quota") || errorMsg.includes("RESOURCE_EXHAUSTED")) {
+        // Try to extract retry delay from error
+        try {
+          const errorObj = typeof error === 'string' ? JSON.parse(error) : error;
+          const retryDelay = errorObj?.error?.details?.find((d: any) => d["@type"]?.includes("RetryInfo"))?.retryDelay;
+          if (retryDelay) {
+            retrySeconds = Math.ceil(parseFloat(retryDelay.replace('s', '')) || 0);
+          }
+        } catch (e) {
+          // Ignore parsing errors
+        }
+        
+        const retryMsg = retrySeconds ? `\n\n⏱️ Please retry in ${retrySeconds} seconds.` : "\n\n⏱️ Please wait a minute and try again.";
+        const quotaMsg = `⚠️ API Quota Exceeded\n\nYou've reached the free tier limit. ${retryMsg}\n\n💡 Options:\n• Wait and try again later\n• Check usage: https://ai.dev/rate-limit\n• Review quotas: https://ai.google.dev/gemini-api/docs/rate-limits`;
+        
+        alert(quotaMsg);
+        setAfterImage(capturedImage);
+        setScreen('result');
+        return;
+      }
+      
+      // Check for authentication errors
+      if (errorMsg.includes("API key") || errorMsg.includes("401") || errorMsg.includes("403") || error?.error?.code === 401 || error?.error?.code === 403) {
+        alert(`⚠️ API Authentication Error\n\n${errorMsg}\n\nPlease check your GEMINI_API_KEY in .env.local`);
+        setScreen('style-selection');
+        return;
+      }
+      
+      // Generic error
+      alert(`⚠️ Image Generation Failed\n\n${errorMsg}\n\nCheck the browser console (F12) for details.`);
       setAfterImage(capturedImage);
-      setTimeout(() => setScreen('result'), 1500);
+      setScreen('result');
+    }
+  };
+  
+  
+
+  const handleGenerateInspiration = async () => {
+    if (!inspirationPrompt.trim()) {
+      alert("Please describe your dream space.");
+      return;
+    }
+
+    setIsGeneratingInspiration(true);
+    setScreen('processing');
+    try {
+      // Check for API key
+      const apiKey = process.env.API_KEY || process.env.GEMINI_API_KEY || '';
+      const apiKeyStr = String(apiKey).trim();
+      
+      if (!apiKeyStr || apiKeyStr === 'undefined' || apiKeyStr === 'null' || apiKeyStr === 'your_api_key_here' || apiKeyStr.length < 20) {
+        alert("⚠️ API key not found. Please add GEMINI_API_KEY to .env.local");
+        setScreen('inspiration');
+        setIsGeneratingInspiration(false);
+        return;
+      }
+
+      console.log("🎨 Generating inspiration image with gemini-2.5-flash-image");
+      const ai = new GoogleGenAI({ apiKey: apiKeyStr });
+
+      // System instruction for high-quality interior design visualization
+      const systemInstruction = "You are a professional interior designer. Generate a high-resolution, professional interior design visualization. The image should be from an eye-level perspective, minimalist and clean, with no humans. Focus on the organized space described.";
+      
+      const fullPrompt = `${systemInstruction}\n\nUser's dream space: ${inspirationPrompt}`;
+
+      const response = await ai.models.generateContent({
+        model: 'gemini-2.5-flash-image',
+        contents: {
+          parts: [
+            { text: fullPrompt }
+          ]
+        }
+      });
+
+      console.log("API response received:", response);
+
+      let genImg = null;
+      const parts = response.candidates?.[0]?.content?.parts || [];
+      
+      console.log("Processing response parts:", parts.length);
+      for (const part of parts) {
+        if (part.inlineData) {
+          genImg = `data:image/jpeg;base64,${part.inlineData.data}`;
+          console.log("✅ Generated inspiration image found");
+          break;
+        }
+      }
+
+      if (genImg) {
+        setAfterImage(genImg);
+        setCapturedImage(genImg); // Use same image for before/after since it's a dream space
+        setViewMode('after');
+        // Set default steps for dream space
+        setSteps([
+          { title: "Visualize Your Space", description: "This is your dream space visualization. Use it as inspiration for organizing." },
+          { title: "Identify Key Elements", description: "Note the organizational principles shown in this design." },
+          { title: "Plan Your Layout", description: "Consider how to apply these concepts to your actual space." },
+          { title: "Start Small", description: "Begin with one area that matches this vision." },
+          { title: "Maintain Progress", description: "Keep this image as a reference for your organizing journey." }
+        ]);
+        setSelectedStyle('Aesthetic'); // Default style for dream spaces
+        setIsGeneratingInspiration(false);
+        setScreen('result');
+      } else {
+        throw new Error("No image generated from Gemini");
+      }
+    } catch (error: any) {
+      console.error("Inspiration generation failed:", error);
+      alert(`⚠️ Failed to generate inspiration image: ${error.message || error.toString()}`);
+      setIsGeneratingInspiration(false);
+      setScreen('inspiration');
     }
   };
 
@@ -320,9 +567,13 @@ const App: React.FC = () => {
               </div>
               <div className="grid grid-cols-2 gap-4 mb-12">
                 {HOME_CATEGORIES.map((cat) => (
-                  <Card key={cat.name} onClick={() => setScreen(cat.screen as Screen)} className="aspect-square flex flex-col items-center justify-center p-6 text-center">
-                    <div className="text-[#2A2826] opacity-30 mb-4">{cat.icon}</div>
-                    <span className="text-[10px] font-bold tracking-[0.2em] uppercase text-[#2A2826]">{cat.name}</span>
+                  <Card 
+                    key={cat.name} 
+                    onClick={() => (cat as any).screen ? setScreen((cat as any).screen as Screen) : setScreen('scan')} 
+                    className="aspect-square flex flex-col items-center justify-center p-6 text-center"
+                  >
+                    <div className={`text-[#2A2826] opacity-30 mb-4 ${cat.name === 'Dream' ? 'text-[#8EA3A1]' : ''}`}>{cat.icon}</div>
+                    <span className={`text-[10px] font-bold tracking-[0.2em] uppercase ${cat.name === 'Dream' ? 'text-[#8EA3A1]' : 'text-[#2A2826]'}`}>{cat.name}</span>
                   </Card>
                 ))}
               </div>
@@ -431,7 +682,26 @@ const App: React.FC = () => {
           <div className="flex flex-col items-center justify-center h-full space-y-12 bg-white">
             <div className="animate-pulse scale-125"><Logo align="order" /></div>
             <div className="text-center space-y-4 px-12">
-              <p className="text-[10px] font-bold tracking-[0.5em] uppercase text-neutral-300 italic">Arranging with precision.</p>
+              {isGeneratingInspiration ? (
+                <>
+                  <p className="text-[10px] font-bold tracking-[0.5em] uppercase" style={{ color: '#8EA3A1' }}>Dreaming of order...</p>
+                  <div className="flex justify-center gap-1.5">
+                    <div className="w-1 h-1 rounded-full animate-bounce [animation-delay:-0.3s]" style={{ backgroundColor: '#8EA3A1' }} />
+                    <div className="w-1 h-1 rounded-full animate-bounce [animation-delay:-0.15s]" style={{ backgroundColor: '#8EA3A1' }} />
+                    <div className="w-1 h-1 rounded-full animate-bounce" style={{ backgroundColor: '#8EA3A1' }} />
+                  </div>
+                </>
+              ) : (
+                <>
+                  <p className="text-[10px] font-bold tracking-[0.5em] uppercase text-neutral-300">Applying {selectedStyle}</p>
+                  <div className="flex justify-center gap-1.5">
+                    <div className="w-1 h-1 rounded-full bg-neutral-200 animate-bounce [animation-delay:-0.3s]" />
+                    <div className="w-1 h-1 rounded-full bg-neutral-200 animate-bounce [animation-delay:-0.15s]" />
+                    <div className="w-1 h-1 rounded-full bg-neutral-200 animate-bounce" />
+                  </div>
+                  <p className="text-xs text-neutral-300 font-light italic mt-6">Our AI is rearranging your belongings with care.</p>
+                </>
+              )}
             </div>
           </div>
         );
@@ -483,6 +753,47 @@ const App: React.FC = () => {
             <div className="p-10 flex gap-4 bg-white border-t border-neutral-50 pb-14">
               <button onClick={() => currentStepIndex > 0 ? setCurrentStepIndex(v => v - 1) : setScreen('result')} className="flex-1 py-6 rounded-3xl bg-neutral-50 text-[11px] font-bold uppercase tracking-widest text-neutral-400">Back</button>
               <button onClick={() => isLastStep ? handleSaveToLibrary() : setCurrentStepIndex(v => v + 1)} className="flex-[2] py-6 rounded-3xl bg-[#2A2826] text-white text-[11px] font-bold uppercase tracking-widest">{isLastStep ? 'Complete' : 'Next'}</button>
+            </div>
+          </div>
+        );
+
+      case 'inspiration':
+        return (
+          <div className="flex flex-col h-full bg-[#FDFCFB]">
+            <div className="p-8 pt-20 flex-1 flex flex-col items-center justify-center">
+              <div className="w-full max-w-md space-y-12">
+                <div className="text-center space-y-4">
+                  <h1 className="text-3xl font-light text-[#2A2826] leading-tight">Dream your space.</h1>
+                  <p className="text-sm text-gray-400 font-light">Describe your ideal organized space, and we'll visualize it.</p>
+                </div>
+                
+                <div className="space-y-6">
+                  <textarea
+                    value={inspirationPrompt}
+                    onChange={(e) => setInspirationPrompt(e.target.value)}
+                    placeholder="e.g., A Japandi kitchen with stone textures and hidden appliances"
+                    className="w-full min-h-[120px] p-6 rounded-3xl border border-neutral-100 bg-white text-[#2A2826] text-base font-light placeholder:text-neutral-300 focus:outline-none focus:border-[#8EA3A1] focus:ring-2 focus:ring-[#8EA3A1]/20 transition-all resize-none"
+                    autoFocus
+                  />
+                  
+                  <Button 
+                    onClick={handleGenerateInspiration} 
+                    className="w-full py-6"
+                    style={{ backgroundColor: inspirationPrompt.trim() ? '#8EA3A1' : undefined }}
+                  >
+                    Generate Dream Space
+                  </Button>
+                </div>
+              </div>
+            </div>
+            
+            <div className="p-8 pb-12">
+              <button 
+                onClick={() => setScreen('home')} 
+                className="w-full py-4 text-xs font-bold uppercase tracking-[0.3em] text-neutral-300"
+              >
+                Back to Home
+              </button>
             </div>
           </div>
         );

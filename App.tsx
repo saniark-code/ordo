@@ -63,6 +63,7 @@ const App: React.FC = () => {
   const [newSpaceName, setNewSpaceName] = useState('');
   const [isGeneratingInspiration, setIsGeneratingInspiration] = useState(false);
   const [isDreamSpaceResult, setIsDreamSpaceResult] = useState(false);
+  const [aiError, setAiError] = useState('');
   
   // Auth Form States
   const [authMode, setAuthMode] = useState<'signin' | 'signup'>('signin');
@@ -102,6 +103,15 @@ const App: React.FC = () => {
     } finally {
       setIsSyncing(false);
     }
+  };
+
+  const getGeminiApiKey = () => {
+    const key = import.meta.env.VITE_GEMINI_API_KEY?.trim();
+    if (!key || key === 'your_gemini_api_key_here') {
+      setAiError('Missing Gemini API key. Set VITE_GEMINI_API_KEY in .env.local and restart the dev server.');
+      return null;
+    }
+    return key;
   };
 
   const handleAuth = async () => {
@@ -198,10 +208,13 @@ const App: React.FC = () => {
 
   const handleGenerateInspiration = async () => {
     if (!inspirationPrompt.trim()) return;
+    setAiError('');
+    const apiKey = getGeminiApiKey();
+    if (!apiKey) return;
     setIsGeneratingInspiration(true);
     setIsDreamSpaceResult(true);
     try {
-      const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+      const ai = new GoogleGenAI({ apiKey });
       const response = await ai.models.generateContent({
         model: 'gemini-2.5-flash-image',
         contents: { 
@@ -223,20 +236,26 @@ const App: React.FC = () => {
         setCapturedImage(null);
         setSteps([]);
         setScreen('result');
+      } else {
+        setAiError('No image returned from Gemini. Check your API key access to image generation.');
       }
     } catch (error) {
       console.error("Moodboard generation failed", error);
+      setAiError('Dream space generation failed. Check your API key, model access, and the browser console for details.');
     } finally {
       setIsGeneratingInspiration(false);
     }
   };
 
   const handleProcessing = async (style: OrganizingStyle) => {
+    setAiError('');
+    const apiKey = getGeminiApiKey();
+    if (!apiKey) return;
     setSelectedStyle(style);
     setIsDreamSpaceResult(false);
     setScreen('processing');
     try {
-      const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
+      const ai = new GoogleGenAI({ apiKey });
       const base64Data = capturedImage?.split(',')[1];
       if (!base64Data) throw new Error("No image data");
 
@@ -258,6 +277,10 @@ const App: React.FC = () => {
         else if (part.text) genTxt += part.text;
       }
 
+      if (!genImg) {
+        setAiError('No image returned from Gemini. Check your API key access to image generation.');
+      }
+
       let parsedSteps: OrganizingStep[] = [];
       try {
         const fullText = response.text || genTxt;
@@ -276,6 +299,7 @@ const App: React.FC = () => {
       setScreen('result');
     } catch (error) {
       console.error("AI Generation failed:", error);
+      setAiError('Image generation failed. Check your API key, model access, and the browser console for details.');
       setAfterImage(capturedImage);
       setTimeout(() => setScreen('result'), 1500);
     }
@@ -650,6 +674,9 @@ const App: React.FC = () => {
                     autoFocus
                     className="w-full text-center text-xl font-light text-[#2A2826] bg-transparent border-b border-neutral-100 py-4 focus:outline-none focus:border-[#8EA3A1] transition-colors"
                   />
+                  {aiError && (
+                    <p className="mt-6 text-[11px] text-red-500 font-medium text-center">{aiError}</p>
+                  )}
                   <div className="mt-12 flex justify-center">
                     <Button onClick={handleGenerateInspiration} className="w-full py-5">Generate Visualization</Button>
                   </div>
@@ -725,6 +752,9 @@ const App: React.FC = () => {
         return (
           <div className="flex flex-col h-full bg-[#FDFCFB] p-8 pt-20 animate-fade-in">
             <h1 className="text-3xl font-light text-[#2A2826] mb-8 tracking-tight">Select Style</h1>
+            {aiError && (
+              <p className="text-[11px] text-red-500 font-medium mb-4">{aiError}</p>
+            )}
             <div className="flex-1 space-y-4 overflow-y-auto no-scrollbar">
               {STYLE_OPTIONS.map((style) => (
                 <Card key={style.title} onClick={() => handleProcessing(style.title as OrganizingStyle)} className="p-6 border border-neutral-50 hover:border-[#8EA3A1]/30 transition-all active:scale-[0.98]">
@@ -780,6 +810,9 @@ const App: React.FC = () => {
                 <p className="text-[15px] text-neutral-400 font-light leading-relaxed max-w-[280px] mx-auto italic">
                   {isDreamSpaceResult ? 'A glimpse of your space in its most balanced state.' : 'Follow the guided plan to restore the balance.'}
                 </p>
+                {aiError && (
+                  <p className="text-[11px] text-red-500 font-medium">{aiError}</p>
+                )}
               </div>
               
               <div className="w-full max-w-sm mt-8 flex flex-col gap-4">
